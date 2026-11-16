@@ -1322,23 +1322,8 @@ function splitTableRow(s) {
   while (i < n) {
     const c = s[i];
     if (c === '\\' && i + 1 < n) { cur += s[i] + s[i + 1]; i += 2; continue; }
-    if (c === '`') {
-      let j = i;
-      while (j < n && s[j] === '`') j++;
-      const run = j - i;
-      let k = j, found = -1;
-      while (k < n) {
-        if (s[k] === '`') {
-          let m = k;
-          while (m < n && s[m] === '`') m++;
-          if (m - k === run) { found = k; break; }
-          k = m;
-        } else k++;
-      }
-      if (found === -1) { cur += s.slice(i, j); i = j; }
-      else { cur += s.slice(i, found + run); i = found + run; }
-      continue;
-    }
+    // GFM/marked: a cell splits on every unescaped '|'; a code span does
+    // NOT protect it (only '\|' does). Backticks are ordinary chars here.
     if (c === '|') { cells.push(cur); cur = ''; i++; continue; }
     cur += c; i++;
   }
