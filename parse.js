@@ -414,8 +414,24 @@ function tryExtAutolink(src, i, inBrackets) {
   return { href, text: url, next: end };
 }
 
+// Is the '_' run ending just before src[i] an emphasis delimiter (can
+// open or close)? If so it is not part of a preceding word, so an email
+// may start at i even though '_' is an email-local char.
+function underscoreRunIsDelim(src, i) {
+  let k = i - 1;
+  while (k >= 0 && src[k] === '_') k--;
+  const f = flanking(src, k + 1, i);
+  const canOpen = f.lf && (!f.rf || f.bp);
+  const canClose = f.rf && (!f.lf || f.ap);
+  return canOpen || canClose;
+}
+
 // Try to match an email address starting at src[i]. Returns {next} or null.
-function tryEmailAt(src, i) {
+// delims (inlineParse's pending openers) is optional: when provided, a
+// trailing '_' after the domain is handled like marked's regex — if the
+// '_' run closes a pending '_' opener the full email links, otherwise the
+// domain backtracks to the last '.' (marked links the shorter address).
+function tryEmailAt(src, i, delims) {
   const n = src.length;
   let j = i;
   while (j < n && isEmailLocalChar(src[j])) j++;
@@ -429,7 +445,41 @@ function tryEmailAt(src, i) {
   // can extend the match; '*', '!', etc. do not block it.
   if (end < n) {
     const c = src[end];
-    if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c === '_' || c === '-') return null;
+    if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c === '_' || c === '-') {
+      // Only '_' can block here (letters/digits/'-' are domain chars and
+      // would have been consumed by domainLen).
+      if (delims && c === '_') {
+        let k = end;
+        while (k < n && src[k] === '_') k++;
+        const runLen = k - end;
+        const f = flanking(src, end, k);
+        const canClose = f.rf && (!f.lf || f.ap);
+        const canOpen = f.lf && (!f.rf || f.bp);
+        let isCloser = false;
+        if (canClose) {
+          for (let t = delims.length - 1; t >= 0; t--) {
+            const dm = delims[t];
+            if (dm.ch === '_' && dm.active && dm.canOpen && dm.len > 0) {
+              if (!(canOpen && (dm.len + runLen) % 3 === 0)) isCloser = true;
+              break;
+            }
+          }
+        }
+        if (isCloser) return { next: end };
+        // Backtrack the domain to the last '.', keeping >= 2 labels.
+        let p = -1;
+        for (let q = j + 1; q < end; q++) if (src[q] === '.') p = q;
+        if (p !== -1) {
+          let hasDot = false;
+          for (let q = j + 1; q < p; q++) if (src[q] === '.') { hasDot = true; break; }
+          if (hasDot) {
+            const lc = src[p - 1];
+            if ((lc >= 'a' && lc <= 'z') || (lc >= 'A' && lc <= 'Z') || (lc >= '0' && lc <= '9')) return { next: p };
+          }
+        }
+      }
+      return null;
+    }
   }
   return { next: end };
 }
@@ -771,9 +821,9 @@ function inlineParse(src, refs) {
       }
     }
     // email autolink at word start (suppressed while inLink)
-    if (!IN_LINK && isEmailLocalChar(c) && (i === 0 || !isEmailLocalChar(src[i - 1]))) {
+    if (!IN_LINK && isEmailLocalChar(c) && (i === 0 || !isEmailLocalChar(src[i - 1]) || (src[i - 1] === '_' && underscoreRunIsDelim(src, i)))) {
       if (src.indexOf('@', i, Math.min(n, i + 64)) !== -1) {
-        const e = tryEmailAt(src, i);
+        const e = tryEmailAt(src, i, delims);
         if (e) {
           const em = src.slice(i, e.next);
           flush(i);
