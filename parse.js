@@ -1699,7 +1699,10 @@ function parseBlocks(lines, lo, hi, refs, endsNl, inList) {
       let trailingNl = false;
       if (stoppedAtBlank) trailingNl = false;
       else if (j >= hi) trailingNl = endsNl;
-      else trailingNl = !isBlankLine(lines[j]);
+      // marked's ge() keeps a single trailing newline when the match has
+      // exactly one (the next line holds whitespace but is not empty), and
+      // strips it when the next line is truly empty (two newlines in a row).
+      else trailingNl = lines[j].s !== '';
       if (trailingNl) text += '\n';
       addBlock({ t: 'html', text });
       i = j;
