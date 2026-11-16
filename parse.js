@@ -286,6 +286,8 @@ function renderOut(out) {
   for (const seg of out) {
     if (typeof seg === 'string') s += seg;
     else if (seg.d) s += renderDelim(seg);
+    else if (seg.bare) s += '<a href="' + escapeText(seg.href) + '">' + escapeText(seg.text) + '</a>';
+    else if (seg.html) s += seg.html;
     else s += '['; // bracket marker renders as literal '['
   }
   return s;
@@ -332,28 +334,17 @@ function domainLen(s, i) {
   return j - i;
 }
 
-// Trim the end of an extended-autolink candidate per GFM rules.
+// marked's GFM _backpedal, applied until fixed point: drops a trailing run
+// of punctuation (?!.,:;*_'\"~) and an unmatched trailing ')' one char at a
+// time; a ')' survives when balanced by '(' or followed by more URL chars;
+// ']' is NOT punctuation here (it stays, and is %5D-encoded in the href).
+const BACKPEDAL = /(?:[^?!.,:;*_'\"~()&]+|\([^)]*\)|&(?![a-zA-Z0-9]+;$)|[?!.,:;*_'\"~)]+(?!$))+/;
 function trimAutolink(s) {
-  // trailing entity-like &xxx;
-  s = s.replace(/&[A-Za-z0-9]+;$/, '');
-  // paren balancing: drop unmatched trailing ')'
-  for (;;) {
-    if (!s.endsWith(')')) break;
-    let open = 0, close = 0;
-    for (let i = 0; i < s.length; i++) {
-      if (s[i] === '(') open++;
-      else if (s[i] === ')') close++;
-    }
-    if (close <= open) break;
-    s = s.slice(0, -1);
-  }
-  // trailing punctuation
-  while (s.length > 0 && '? ! . , : ; * _ ~ ]'.indexOf(s[s.length - 1]) !== -1) {
-    // note: the set is checked char by char below (spaces in the string are separators)
-    break;
-  }
-  const PUNCT = '?!.,:;*_~]';
-  while (s.length > 0 && PUNCT.indexOf(s[s.length - 1]) !== -1) s = s.slice(0, -1);
+  let prev;
+  do {
+    prev = s;
+    s = (BACKPEDAL.exec(s) || [''])[0];
+  } while (prev !== s);
   return s;
 }
 
@@ -373,7 +364,8 @@ function tryExtAutolink(src, i) {
     let url = trimAutolink(src.slice(i, j));
     if (url.length === 0) return null;
     // re-validate domain after trimming (trimming only touches the tail)
-    const href = 'http://' + url;
+    const href = cleanUrl('http://' + url);
+    if (href === null) return null;
     return { href, text: url, next: i + url.length };
   }
   // scheme
@@ -401,7 +393,9 @@ function tryExtAutolink(src, i) {
     if (colon !== -1) auth = auth.slice(0, colon);
     if (auth.indexOf('.') === -1) return null;
     if (domainLen(auth, 0) !== auth.length && auth.indexOf('.') === -1) return null;
-    return { href: url, text: url, next: i + url.length };
+    const href = cleanUrl(url);
+    if (href === null) return null;
+    return { href, text: url, next: i + url.length };
   }
   // scheme:email[/segment]
   const e = tryEmailAt(src, j + 1);
@@ -413,7 +407,9 @@ function tryExtAutolink(src, i) {
     if (k > end + 1) end = k;
   }
   const url = src.slice(i, end);
-  return { href: url, text: url, next: end };
+  const href = cleanUrl(url);
+  if (href === null) return null;
+  return { href, text: url, next: end };
 }
 
 // Try to match an email address starting at src[i]. Returns {next} or null.
@@ -427,12 +423,11 @@ function tryEmailAt(src, i) {
   const d = domainLen(src, j + 1);
   if (d === 0) return null;
   const end = j + 1 + d;
-  // the character after the match must not be able to extend the email
+  // marked's email regex ends with (?![\w-]): only a word char or '-'
+  // can extend the match; '*', '!', etc. do not block it.
   if (end < n) {
     const c = src[end];
-    // '.' is trailing punctuation (allowed); '/' starts a scheme:email
-    // path segment (allowed) — neither extends the email address.
-    if (isEmailLocalChar(c) && c !== '.' && c !== '/') return null;
+    if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c === '_' || c === '-') return null;
   }
   return { next: end };
 }
@@ -506,9 +501,16 @@ function tryAngle(src, i) {
   if (src[j] === '/') { closing = true; j++; }
   if (j >= n || !/[A-Za-z]/.test(src[j])) return null;
   while (j < n && /[A-Za-z0-9-]/.test(src[j])) j++;
+  const nameEnd = j;
+  const tagName = src.slice(i + 1, nameEnd).toLowerCase();
   if (closing) {
     while (j < n && (src[j] === ' ' || src[j] === '\t' || src[j] === '\n')) j++;
-    if (j < n && src[j] === '>') return { html: src.slice(i, j + 1), next: j + 1 };
+    if (j < n && src[j] === '>') {
+      const html = src.slice(i, j + 1);
+      // marked's endATag is exactly </a> (case-insensitive): </a > does not clear.
+      if (/^<\/a>/i.test(html)) IN_LINK = false;
+      return { html, next: j + 1 };
+    }
     return null;
   }
   // attributes (each must be preceded by whitespace)
@@ -516,8 +518,15 @@ function tryAngle(src, i) {
     let ws = 0;
     while (j < n && (src[j] === ' ' || src[j] === '\t' || src[j] === '\n')) { j++; ws++; }
     if (j >= n) return null;
-    if (src[j] === '>') return { html: src.slice(i, j + 1), next: j + 1 };
-    if (src[j] === '/' && j + 1 < n && src[j + 1] === '>') return { html: src.slice(i, j + 2), next: j + 2 };
+    if (src[j] === '>') {
+      // marked's startATag is /^<a /i: <a> alone does not set inLink.
+      if (tagName === 'a' && src[nameEnd] === ' ') IN_LINK = true;
+      return { html: src.slice(i, j + 1), next: j + 1 };
+    }
+    if (src[j] === '/' && j + 1 < n && src[j + 1] === '>') {
+      if (tagName === 'a' && src[nameEnd] === ' ') IN_LINK = true;
+      return { html: src.slice(i, j + 2), next: j + 2 };
+    }
     if (ws === 0) return null;
     // attribute name
     if (!/[A-Za-z_:][A-Za-z0-9_.:-]*/.test(src.slice(j, j + 1))) return null;
@@ -686,7 +695,7 @@ function inlineParse(src, refs) {
       flush(i);
       out.push('!');
       const bangIdx = out.length - 1;
-      const marker = { b: true, active: true, isImage: true, bangIdx, srcIdx: i + 1, outIdx: out.length };
+      const marker = { b: true, active: true, isImage: true, bangIdx, srcIdx: i + 1, outIdx: out.length, inLink: IN_LINK };
       out.push(marker);
       brackets.push(marker);
       i += 2; textStart = i;
@@ -694,7 +703,7 @@ function inlineParse(src, refs) {
     }
     if (c === '[') {
       flush(i);
-      const marker = { b: true, active: true, isImage: false, bangIdx: -1, srcIdx: i, outIdx: out.length };
+      const marker = { b: true, active: true, isImage: false, bangIdx: -1, srcIdx: i, outIdx: out.length, inLink: IN_LINK };
       out.push(marker);
       brackets.push(marker);
       i++; textStart = i;
@@ -750,23 +759,23 @@ function inlineParse(src, refs) {
       continue;
     }
 
-    // extended autolinks: www. / scheme
-    if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) {
+    // extended autolinks: www. / scheme (suppressed while inLink)
+    if (!IN_LINK && ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'))) {
       const a = tryExtAutolink(src, i);
       if (a) {
         flush(i);
-        out.push('<a href="' + escapeText(a.href) + '">' + escapeText(a.text) + '</a>');
+        out.push({ a: 1, bare: 1, href: a.href, text: a.text });
         i = a.next; textStart = i; continue;
       }
     }
-    // email autolink at word start
-    if (isEmailLocalChar(c) && (i === 0 || !isEmailLocalChar(src[i - 1]))) {
+    // email autolink at word start (suppressed while inLink)
+    if (!IN_LINK && isEmailLocalChar(c) && (i === 0 || !isEmailLocalChar(src[i - 1]))) {
       if (src.indexOf('@', i, Math.min(n, i + 64)) !== -1) {
         const e = tryEmailAt(src, i);
         if (e) {
           const em = src.slice(i, e.next);
           flush(i);
-          out.push('<a href="mailto:' + escapeText(em) + '">' + escapeText(em) + '</a>');
+          out.push({ a: 1, bare: 1, href: 'mailto:' + em, text: em });
           i = e.next; textStart = i; continue;
         }
       }
@@ -781,7 +790,15 @@ function inlineParse(src, refs) {
 // Attempt to form a link/image at src[i] == ']' with open bracket b.
 // Returns the index after the link, or null if no link forms.
 function tryFormLink(src, i, b, out, delims, brackets, refs) {
-  const textHtml = renderOut(out.slice(b.outIdx + 1));
+  // A link inside this link's text vetoes the outer LINK (marked's
+  // linkEmitted) — but not an outer IMAGE, whose alt text may contain one.
+  // The inner link stays, the outer '[' stays literal.
+  if (!b.isImage) {
+    for (let k = b.outIdx + 1; k < out.length; k++) {
+      const seg = out[k];
+      if (seg && typeof seg === 'object' && seg.link) return null;
+    }
+  }
   const textRaw = src.slice(b.srcIdx + 1, i);
   let href = null, title = null, next = -1;
 
@@ -819,6 +836,14 @@ function tryFormLink(src, i, b, out, delims, brackets, refs) {
   const clean = cleanUrl(unescapeStr(href));
   if (clean === null) return null;
 
+  // Bare autolinks inside link text are suppressed (marked's inLink):
+  // downgrade them to plain text now that the link is known to form.
+  for (let k = b.outIdx + 1; k < out.length; k++) {
+    const seg = out[k];
+    if (seg && typeof seg === 'object' && seg.bare) out[k] = escapeText(seg.text);
+  }
+  const textHtml = renderOut(out.slice(b.outIdx + 1));
+
   let html;
   if (b.isImage) {
     const alt = stripTags(textHtml);
@@ -832,7 +857,10 @@ function tryFormLink(src, i, b, out, delims, brackets, refs) {
     html += '>' + textHtml + '</a>';
   }
   // replace bracket + text with the link; drop delimiters/brackets inside it
-  out.splice(b.outIdx, out.length - b.outIdx, html);
+  out.splice(b.outIdx, out.length - b.outIdx, { a: 1, link: b.isImage ? 0 : 1, html });
+  // marked's De restores inLink to its pre-link value: tag toggles inside
+  // the link text do not leak out.
+  IN_LINK = b.inLink;
   for (let k = delims.length - 1; k >= 0; k--) {
     if (delims[k].outIdx > b.outIdx) delims.splice(k, 1);
   }
@@ -1714,10 +1742,15 @@ function renderBlocks(blocks, refs) {
 }
 
 let INPUT_ENDS_NL = false;
+// marked's lexer inLink: set by a raw <a ...> tag, cleared by </a>, and
+// PERSISTS across paragraphs until cleared (it suppresses bare-URL/email
+// autolinks). Reset at the start of every parse().
+let IN_LINK = false;
 
 export function parse(markdown) {
   const s = markdown.replace(/\r\n?/g, '\n');
   INPUT_ENDS_NL = s.endsWith('\n');
+  IN_LINK = false;
   const raw = s.split('\n');
   if (raw.length && raw[raw.length - 1] === '') raw.pop();
   const lines = raw.map(x => L(x, 0));
