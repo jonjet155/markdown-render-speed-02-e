@@ -349,8 +349,10 @@ function trimAutolink(s) {
 }
 
 // Try to match an extended autolink starting at src[i] (letter).
+// inBrackets: inside link text the candidate must stop at ']' (marked
+// suppresses autolinks there, so ']' always closes the label).
 // Returns {href, text, next} or null.
-function tryExtAutolink(src, i) {
+function tryExtAutolink(src, i, inBrackets) {
   const n = src.length;
   const prev = i > 0 ? src[i - 1] : '';
   const prevOk = prev === '' || isSpace(prev.charCodeAt(0)) || isUnicodePunct(prev);
@@ -360,7 +362,7 @@ function tryExtAutolink(src, i) {
     const d = domainLen(src, i + 4);
     if (d === 0) return null;
     let j = i + 4 + d;
-    while (j < n && !isSpace(src.charCodeAt(j)) && src[j] !== '<') j++;
+    while (j < n && !isSpace(src.charCodeAt(j)) && src[j] !== '<' && !(inBrackets && src[j] === ']')) j++;
     let url = trimAutolink(src.slice(i, j));
     if (url.length === 0) return null;
     // re-validate domain after trimming (trimming only touches the tail)
@@ -380,7 +382,7 @@ function tryExtAutolink(src, i) {
   if (src[j + 1] === '/' && src[j + 2] === '/') {
     // scheme:// authority + path
     let k = j + 3;
-    while (k < n && !isSpace(src.charCodeAt(k)) && src[k] !== '<') k++;
+    while (k < n && !isSpace(src.charCodeAt(k)) && src[k] !== '<' && !(inBrackets && src[k] === ']')) k++;
     let url = trimAutolink(src.slice(i, k));
     if (url.length === 0) return null;
     // authority (before first '/') must contain a dot (after stripping user@ and :port)
@@ -761,7 +763,7 @@ function inlineParse(src, refs) {
 
     // extended autolinks: www. / scheme (suppressed while inLink)
     if (!IN_LINK && ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'))) {
-      const a = tryExtAutolink(src, i);
+      const a = tryExtAutolink(src, i, brackets.length > 0);
       if (a) {
         flush(i);
         out.push({ a: 1, bare: 1, href: a.href, text: a.text });
