@@ -1540,7 +1540,10 @@ function parseBlocks(lines, lo, hi, refs, endsNl, inList) {
             let j = i + 1;
             while (j < hi) {
               const rl = lines[j];
-              if (isBlankLine(rl)) break;
+              // A whitespace-only line containing a tab is a table row
+              // (empty cells), not the end of the table; a spaces-only or
+              // empty line ends it.
+              if (isBlankLine(rl) && rl.s.indexOf('\t') === -1) break;
               const rinfo = firstNonWs(rl);
               const rc = restOf(rl, rinfo);
               if (startsBlock(rc, inList)) break;
