@@ -1312,6 +1312,10 @@ function gatherQuote(lines, j, hi) {
   let k = j;
   let paraOpen = false;
   let prevLazy = false;
+  // A fenced code block open in the quote content: its lines are not
+  // paragraph text, and a line without '>' cannot lazily continue it —
+  // it ends the fence (and the quote).
+  let inFence = null;
   while (k < hi) {
     const line = lines[k];
     const inf = firstNonWs(line);
@@ -1330,12 +1334,24 @@ function gatherQuote(lines, j, hi) {
       const content = pend > 0 ? ' '.repeat(pend) + line.s.slice(idx) : line.s.slice(idx);
       const subLine = L(content, col);
       sub.push(subLine);
-      paraOpen = content !== '' && deepIsPara(content);
+      if (inFence) {
+        const cinf = firstNonWs(L(content, 0));
+        if (cinf.col <= 3 && isFenceClose(content.slice(cinf.idx), inFence)) inFence = null;
+        paraOpen = false;
+      } else {
+        const cinf = firstNonWs(L(content, 0));
+        if (cinf.col <= 3) {
+          const f = matchFence(content.slice(cinf.idx));
+          if (f) inFence = f;
+        }
+        paraOpen = content !== '' && deepIsPara(content);
+      }
       prevLazy = false;
       k++;
       continue;
     }
     if (isBlankLine(line)) break;
+    if (inFence) break;
     const cnt = restOf(line, inf);
     // Lazy continuation: a line indented >=4 cannot start a block that
     // interrupts a paragraph (it would be indented code), so it is text.
