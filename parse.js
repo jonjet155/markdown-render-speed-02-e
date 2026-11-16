@@ -694,6 +694,21 @@ function inlineParse(src, refs) {
         } else k++;
       }
       if (found === -1) { i = j; continue; }
+      // A code span must not swallow a ']' that would form a valid link
+      // for an open bracket (the link is recognized first); it may still
+      // span a ']' whose label is invalid.
+      if (brackets.length > 0) {
+        let b = null;
+        for (let t = brackets.length - 1; t >= 0; t--) { if (brackets[t].active) { b = brackets[t]; break; } }
+        if (b) {
+          let closeIdx = -1;
+          for (let q = b.srcIdx + 1; q < found; q++) {
+            if (src[q] === '\\' && q + 1 < found) { q++; continue; }
+            if (src[q] === ']') { closeIdx = q; break; }
+          }
+          if (closeIdx >= j && linkWouldForm(src, closeIdx, b, out, refs)) { i = j; continue; }
+        }
+      }
       flush(i);
       let content = src.slice(j, found).replace(/\n/g, ' ');
       if (content.length >= 2 && content[0] === ' ' && content[content.length - 1] === ' ' && content.trim() !== '') {
@@ -844,6 +859,54 @@ function inlineParse(src, refs) {
 // spans, or a run of backticks before ']', but no bare backtick. A label
 // that fails it cannot form a link (the '[' stays literal).
 const LABEL_RE = /^(?:\[(?:\[(?:\\[\s\S]|[^\[\]\\])*\]|\\[\s\S]|[^\[\]\\])*?\]|\\[\s\S]|`+(?!`)[^`]*?`+(?!`)|``+(?=\])|[^\[\]\\`])*\]$/;
+
+// Side-effect-free check: would the ']' at src[closeIdx] form a link/image
+// for bracket b? Mirrors tryFormLink's validation (veto, label, dest/ref,
+// cleanUrl) without mutating anything. Used by the code-span branch so a
+// code span does not swallow a ']' that would form a valid link (it may
+// still span a ']' whose label is invalid).
+function linkWouldForm(src, closeIdx, b, out, refs) {
+  if (!b.isImage) {
+    for (let k = b.outIdx + 1; k < out.length; k++) {
+      const seg = out[k];
+      if (seg && typeof seg === 'object' && seg.link) return false;
+    }
+  }
+  const textRaw = src.slice(b.srcIdx + 1, closeIdx);
+  if (!LABEL_RE.test(textRaw + ']')) return false;
+  let href = null;
+  const i = closeIdx;
+  if (i + 1 < src.length && src[i + 1] === '(') {
+    const r = parseInlineLink(src, i + 1);
+    if (r) href = r.href;
+    else {
+      const ref = refs.get(normalizeLabel(textRaw));
+      if (!ref) return false;
+      href = ref.href;
+    }
+  } else if (i + 1 < src.length && src[i + 1] === '[') {
+    const lab = parseLabel(src, i + 1);
+    if (!lab) {
+      const ref = refs.get(normalizeLabel(textRaw));
+      if (!ref) return false;
+      href = ref.href;
+    } else if (lab.label !== '') {
+      const ref = refs.get(normalizeLabel(lab.label));
+      if (!ref) return false;
+      href = ref.href;
+    } else {
+      const ref = refs.get(normalizeLabel(textRaw));
+      if (!ref) return false;
+      href = ref.href;
+    }
+  } else {
+    const ref = refs.get(normalizeLabel(textRaw));
+    if (!ref) return false;
+    href = ref.href;
+  }
+  if (cleanUrl(unescapeStr(href)) === null) return false;
+  return true;
+}
 
 // Attempt to form a link/image at src[i] == ']' with open bracket b.
 // Returns the index after the link, or null if no link forms.
