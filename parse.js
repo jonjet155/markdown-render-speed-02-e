@@ -789,6 +789,12 @@ function inlineParse(src, refs) {
   return renderOut(out);
 }
 
+// marked's link-label pattern (its `re`, with the nested-bracket part
+// inlined): a label may contain nested [...], backslash escapes, code
+// spans, or a run of backticks before ']', but no bare backtick. A label
+// that fails it cannot form a link (the '[' stays literal).
+const LABEL_RE = /^(?:\[(?:\[(?:\\[\s\S]|[^\[\]\\])*\]|\\[\s\S]|[^\[\]\\])*?\]|\\[\s\S]|`+(?!`)[^`]*?`+(?!`)|``+(?=\])|[^\[\]\\`])*\]$/;
+
 // Attempt to form a link/image at src[i] == ']' with open bracket b.
 // Returns the index after the link, or null if no link forms.
 function tryFormLink(src, i, b, out, delims, brackets, refs) {
@@ -802,6 +808,9 @@ function tryFormLink(src, i, b, out, delims, brackets, refs) {
     }
   }
   const textRaw = src.slice(b.srcIdx + 1, i);
+  // the label pattern is followed by ']' in marked's regex (the ``+(?=])
+  // alternative needs it), so validate the label plus its closing bracket
+  if (!LABEL_RE.test(textRaw + ']')) return null;
   let href = null, title = null, next = -1;
 
   if (i + 1 < src.length && src[i + 1] === '(') {
